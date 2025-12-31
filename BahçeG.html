@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Akıllı Bahçe Paneli</title>
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f4f8; margin: 0; padding: 15px; }
+        .container { max-width: 1200px; margin: auto; }
+        .card { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        
+        #fire-alert { 
+            display: none; background: #ff3f34; color: white; padding: 20px; 
+            text-align: center; font-size: 30px; font-weight: bold; border-radius: 15px;
+            margin-bottom: 20px; animation: blinker 0.6s linear infinite; 
+        }
+        @keyframes blinker { 50% { opacity: 0; } }
+
+        .status-card { text-align: center; padding: 10px; border-radius: 10px; margin-bottom: 15px; font-weight: bold; }
+        .active { background: #e3fcef; color: #10ac84; border: 2px solid #10ac84; }
+        .passive { background: #ffeeee; color: #ee5253; border: 2px solid #ee5253; }
+        
+        .power-btn { font-size: 18px; padding: 15px 40px; border-radius: 30px; border: none; cursor: pointer; color: white; transition: 0.3s; font-weight: bold; }
+        .btn-on { background: #10ac84; box-shadow: 0 4px #0a8a6a; }
+        .btn-off { background: #ee5253; box-shadow: 0 4px #c0392b; }
+
+        #gauge_div { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+        #line_chart_div { width: 100%; height: 350px; }
+
+        .log-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; height: 200px; }
+        .log-col { background: #222f3e; color: #1dd1a1; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+        .log-header { background: #341f97; color: white; padding: 6px; text-align: center; font-size: 0.8em; }
+        .log-content { padding: 10px; overflow-y: auto; font-family: monospace; font-size: 11px; }
+        .log-entry { border-bottom: 1px solid #576574; padding: 3px 0; display: flex; justify-content: space-between; }
+        .time-tag { color: #54a0ff; }
+        .oneri-text { font-style: italic; color: #576574; border-left: 4px solid #feca57; padding-left: 10px; margin-top: 10px; }
+    </style>
+
+    <script>
+        var mqtt_server = "broker.hivemq.com";
+        var mqtt_port = 8000;
+        var client, lineChart, lineData, gaugeChart, gaugeData;
+        var currentValues = { s: 0, h: 0, t: 0, i: 0 };
+        var isSystemOpen = true;
+
+        google.charts.load('current', {'packages':['corechart', 'gauge']});
+        google.charts.setOnLoadCallback(init);
+
+        function init() {
+            // 4 Adet Sayaç (Gauge)
+            gaugeData = google.visualization.arrayToDataTable([
+                ['Label', 'Value'],
+                ['Sıcaklık', 0],
+                ['Nem', 0],
+                ['Toprak', 0],
+                ['Işık', 0]
+            ]);
+
+            gaugeOptions = {
+                width: 800, height: 200,
+                redFrom: 90, redTo: 100,
+                yellowFrom: 75, yellowTo: 90,
+                minorTicks: 5
+            };
+
+            gaugeChart = new google.visualization.Gauge(document.getElementById('gauge_div'));
+            gaugeChart.draw(gaugeData, gaugeOptions);
+
+            lineData = new google.visualization.DataTable();
+            lineData.addColumn('string', 'Zaman');
+            lineData.addColumn('number', 'Sıcaklık');
+            lineData.addColumn('number', 'Hava Nemi');
+            lineData.addColumn('number', 'Toprak Nemi');
+            lineData.addColumn('number', 'Işık');
+            lineChart = new google.visualization.LineChart(document.getElementById('line_chart_div'));
+
+            connectMQTT();
+        }
+
+        function connectMQTT() {
+            client = new Paho.MQTT.Client(mqtt_server, mqtt_port, "Gaye_Web_" + Math.random());
+            client.onMessageArrived = (msg) => {
+                let val = msg.payloadString;
+                let topic = msg.destinationName;
+                let time = new Date().toLocaleTimeString().split(' ')[0];
+
+                if (topic === "Bahce/ev/durum") {
+                    isSystemOpen = (val === "1");
+                    updateUI();
+                }
+                else if (topic.includes("sicaklik")) {
+                    currentValues.s = parseFloat(val);
+                    gaugeData.setValue(0, 1, currentValues.s);
+                    addLog("log-s", time, val + "°C");
+                } 
+                else if (topic.includes("havanemi")) {
+                    currentValues.h = parseFloat(val);
+                    gaugeData.setValue(1, 1, currentValues.h);
+                    addLog("log-h", time, "%" + val);
+                }
+                else if (topic.includes("topraknemi")) {
+                    currentValues.t = parseFloat(val);
+                    gaugeData.setValue(2, 1, currentValues.t);
+                    addLog("log-t", time, "%" + val);
+                    
+                    lineData.addRow([time, currentValues.s, currentValues.h, currentValues.t, currentValues.i]);
+                    if (lineData.getNumberOfRows() > 20) lineData.removeRow(0);
+                    lineChart.draw(lineData, { curveType: 'function', legend: {position: 'bottom'}, colors: ['#ff6b6b', '#54a0ff', '#1dd1a1', '#feca57']});
+                }
+                else if (topic.includes("isik")) {
+                    currentValues.i = parseFloat(val);
+                    gaugeData.setValue(3, 1, currentValues.i); // Işık sayacını güncelle
+                    addLog("log-i", time, "%" + val);
+                }
+                else if (topic.includes("yangin")) {
+                    document.getElementById("fire-alert").style.display = (val === "1") ? "block" : "none";
+                }
+                else if (topic.includes("oneri")) {
+                    document.getElementById("oneri-text").innerText = "Öneri: " + val;
+                }
+
+                gaugeChart.draw(gaugeData, gaugeOptions);
+            };
+            client.connect({onSuccess: () => { 
+                client.subscribe("Bahce/ev/bitki/#"); 
+                client.subscribe("Bahce/ev/durum"); 
+            }});
+        }
+
+        function updateUI() {
+            const btn = document.getElementById("main-power-btn");
+            const statusBox = document.getElementById("status-box");
+            if (isSystemOpen) {
+                btn.innerHTML = "SİSTEMİ KAPAT";
+                btn.className = "power-btn btn-off";
+                statusBox.innerHTML = "DURUM: SİSTEM AKTİF";
+                statusBox.className = "status-card active";
+            } else {
+                btn.innerHTML = "SİSTEMİ AÇ";
+                btn.className = "power-btn btn-on";
+                statusBox.innerHTML = "DURUM: SİSTEM DURDURULDU";
+                statusBox.className = "status-card passive";
+            }
+        }
+
+        function togglePower() {
+            let cmd = isSystemOpen ? "0" : "1";
+            let m = new Paho.MQTT.Message(cmd);
+            m.destinationName = "Bahce/kontrol/guc";
+            client.send(m);
+        }
+
+        function addLog(id, time, val) {
+            const el = document.getElementById(id);
+            const div = document.createElement("div");
+            div.className = "log-entry";
+            div.innerHTML = `<span class="time-tag">${time}</span> <span>${val}</span>`;
+            el.prepend(div);
+        }
+    </script>
+</head>
+<body>
+
+<div class="container">
+    <div id="fire-alert">🔥 DİKKAT: YANGIN ALGILANDI! 🔥</div>
+
+    <div class="card">
+        <center><h2>🌿Akıllı Bahçe Paneli</h2></center>
+        <div id="status-box" class="status-card active">DURUM: BAĞLANILIYOR...</div>
+        
+        <div style="text-align:center; margin-bottom: 20px;">
+            <button id="main-power-btn" class="power-btn btn-off" onclick="togglePower()">SİSTEMİ KAPAT</button>
+        </div>
+
+        <div id="oneri-text" class="oneri-text">Öneri: Sensör verileri bekleniyor...</div>
+    </div>
+
+    <div class="card"><div id="gauge_div"></div></div>
+
+    <div class="card"><div id="line_chart_div"></div></div>
+
+    <div class="log-grid">
+        <div class="log-col"><div class="log-header">🌡️ Sıcaklık</div><div id="log-s" class="log-content"></div></div>
+        <div class="log-col"><div class="log-header">💧 Hava Nem</div><div id="log-h" class="log-content"></div></div>
+        <div class="log-col"><div class="log-header">🪴 Toprak Nem</div><div id="log-t" class="log-content"></div></div>
+        <div class="log-col"><div class="log-header">☀️ Işık</div><div id="log-i" class="log-content"></div></div>
+    </div>
+</div>
+
+</body>
+</html>
